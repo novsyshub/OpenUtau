@@ -167,50 +167,42 @@ namespace OpenUtau.Plugin.Builtin {
                 return $"({prevV}) {(cc != null ? string.Join(" ", cc) : "")}";
             }
         }
-
-        // YAML watcher
+        protected virtual string YamlFileName {get;}
+        protected virtual byte[] YamlTemplate {get;}
+        protected virtual string YamlVersion {get;set;}
+        protected YamlOverseer yamlOverseer;
         private static int globalSbpGeneration = 0;
         private int localSbpGeneration = 0;
-        public static YamlWatcher singerYamlWatcher;
-        public static YamlWatcher pluginYamlWatcher;
-        public static string currentlyWatchedSingerDir;
-        public static string currentlyWatchedPluginDir;
         private bool _singerLoaded = false;
+        public YAMLData? mergedData;
 
         private void SetupYamlWatchers(string singerDir, string pluginDir) {
-            if (!string.IsNullOrEmpty(singerDir) && currentlyWatchedSingerDir != singerDir) {
-                singerYamlWatcher?.Dispose();
-                singerYamlWatcher = null;
-                currentlyWatchedSingerDir = singerDir;
+            yamlOverseer = new YamlOverseer {
+                    YamlFileName = YamlFileName,
+                    YamlTemplate = YamlTemplate
+                };
+            yamlOverseer.SetupYamlWatchers(singerDir,pluginDir);
+            if (!string.IsNullOrEmpty(singerDir) && yamlOverseer.currentlyWatchedSingerDir != singerDir) {
+                yamlOverseer.singerYamlWatcher?.Dispose();
+                yamlOverseer.singerYamlWatcher = null;
+                yamlOverseer.currentlyWatchedSingerDir = singerDir;
 
                 if (Directory.Exists(singerDir)) {
-                    singerYamlWatcher = new YamlWatcher(singerDir, () => {
-                        Log.Information($"[SyllableBasedPhonemizer] Singer YAML change detected in '{singerDir}'. Reloading...");
-                        System.Threading.Thread.Sleep(200);
-                        YamlCache.Clear();
-                        globalSbpGeneration++;
-                        _singerLoaded = false; // Reset loaded flag so SetSinger is forced to re-run
-
                         if (this.singer != null) {
                             OpenUtau.Core.SingerManager.Inst.ScheduleReload(this.singer);
                             try {
                                 OpenUtau.Core.DocManager.Inst.ExecuteCmd(new OpenUtau.Core.VoiceColorRemappingNotification(-1, true));
                             } catch { }
                         }
-                    });
-                }
+                    };
             }
 
-            if (!string.IsNullOrEmpty(pluginDir) && currentlyWatchedPluginDir != pluginDir) {
-                pluginYamlWatcher?.Dispose();
-                pluginYamlWatcher = null;
-                currentlyWatchedPluginDir = pluginDir;
+            if (!string.IsNullOrEmpty(pluginDir) && yamlOverseer.currentlyWatchedPluginDir != pluginDir) {
+                yamlOverseer.pluginYamlWatcher?.Dispose();
+                yamlOverseer.pluginYamlWatcher = null;
+                yamlOverseer.currentlyWatchedPluginDir = pluginDir;
 
                 if (Directory.Exists(pluginDir)) {
-                    pluginYamlWatcher = new YamlWatcher(pluginDir, () => {
-                        Log.Information($"[SyllableBasedPhonemizer] Global Plugin YAML change detected in '{pluginDir}'. Reloading...");
-                        System.Threading.Thread.Sleep(200);
-                        YamlCache.Clear();
                         globalSbpGeneration++;
                         _singerLoaded = false; // Reset loaded flag
 
@@ -220,10 +212,9 @@ namespace OpenUtau.Plugin.Builtin {
                                 OpenUtau.Core.DocManager.Inst.ExecuteCmd(new OpenUtau.Core.VoiceColorRemappingNotification(-1, true));
                             } catch { }
                         }
-                    });
+                    };
                 }
             }
-        }
 
         public override Result Process(Note[] notes, Note? prev, Note? next, Note? prevNeighbour, Note? nextNeighbour, Note[] prevNeighbours) {
             error = "";
@@ -464,138 +455,6 @@ namespace OpenUtau.Plugin.Builtin {
             };
         }
 
-        protected static readonly YamlDotNet.Serialization.IDeserializer TolerantDeserializer = 
-            new YamlDotNet.Serialization.DeserializerBuilder()
-            .WithNamingConvention(YamlDotNet.Serialization.NamingConventions.UnderscoredNamingConvention.Instance)
-            .IgnoreUnmatchedProperties()
-            .Build();
-
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime lastModified, YAMLData data)> YamlCache = new();
-
-        /// <summary>
-        /// Core version parser that reads line-by-line from any TextReader stream.
-        /// </summary>
-        private static string ReadVersionFast(TextReader reader) {
-            if (reader == null) return string.Empty;
-            try {
-                string line;
-                while ((line = reader.ReadLine()) != null) {
-                    var trimmed = line.Trim();
-                    if (trimmed.StartsWith("version:", StringComparison.OrdinalIgnoreCase)) {
-                        var parts = trimmed.Split(new[] { ':' }, 2);
-                        if (parts.Length > 1) {
-                            return parts[1].Trim().Trim('"', '\'');
-                        }
-                    }
-                }
-            } catch {
-                // Fallback if parsing fails
-            }
-            return string.Empty;
-        }
-        /// Overload for byte[].
-        private static string ReadVersionFast(byte[] bytes) {
-            if (bytes == null || bytes.Length == 0) return string.Empty;
-            using var ms = new MemoryStream(bytes);
-            using var reader = new StreamReader(ms, Encoding.UTF8);
-            return ReadVersionFast(reader);
-        }
-        /// Overload for file paths
-        private static string ReadVersionFast(string filePath) {
-            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) return string.Empty;
-            try {
-                using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                using var reader = new StreamReader(stream, Encoding.UTF8);
-                return ReadVersionFast(reader);
-            } catch {
-                return string.Empty;
-            }
-        }
-
-        private void CheckAndUpdateYamls(string globalFile, string singerFile) {
-            if (YamlTemplate == null) return;
-
-            string targetVersion = ReadVersionFast(YamlTemplate);
-            if (string.IsNullOrEmpty(targetVersion)) {
-                targetVersion = YamlVersion ?? "1.0"; 
-            }
-
-            // Global Plugin YAML
-            UpdateYamlIfNeeded(globalFile, targetVersion, isGlobal: true);
-            // Singer Local YAML
-            if (!string.IsNullOrEmpty(singerFile)) {
-                UpdateYamlIfNeeded(singerFile, targetVersion, isGlobal: false);
-            }
-        }
-
-        private void UpdateYamlIfNeeded(string filePath, string targetVersion, bool isGlobal) {
-            if (string.IsNullOrEmpty(filePath)) return;
-
-            bool isOutdated = false;
-            string currentVersion = string.Empty;
-
-            if (File.Exists(filePath)) {
-                try {
-                    currentVersion = ReadVersionFast(filePath);
-
-                    if (string.IsNullOrEmpty(currentVersion)) {
-                        string initialBaseline = YamlVersion ?? "1.0";
-
-                        if (System.Version.TryParse(targetVersion, out System.Version targetV) &&
-                            System.Version.TryParse(initialBaseline, out System.Version initV)) {
-                            if (targetV > initV) {
-                                isOutdated = true; // Version bump detected in template
-                            }
-                        } else if (!string.IsNullOrEmpty(targetVersion) && 
-                                !string.Equals(targetVersion, initialBaseline, StringComparison.OrdinalIgnoreCase)) {
-                            isOutdated = true;
-                        }
-                    } else if (System.Version.TryParse(currentVersion, out System.Version currV) &&
-                            System.Version.TryParse(targetVersion, out System.Version targetV)) {
-                        if (currV < targetV) {
-                            isOutdated = true;
-                        }
-                    } else if (!string.Equals(currentVersion, targetVersion, StringComparison.OrdinalIgnoreCase)) {
-                        isOutdated = true;
-                    }
-                } catch (Exception ex) {
-                    Log.Error(ex, $"[YamlUpdate] Syntax error in '{filePath}'. Skipping auto-update.");
-                    return;
-                }
-            } else if (isGlobal) {
-                // Initial creation of global template if missing
-                try {
-                    string dir = Path.GetDirectoryName(filePath);
-                    if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-                    File.WriteAllBytes(filePath, YamlTemplate);
-                    Log.Information($"[YamlUpdate] Created new global template at '{filePath}' (v{targetVersion})");
-                } catch (Exception ex) {
-                    Log.Error(ex, $"[YamlUpdate] Failed to write global template to '{filePath}'");
-                }
-                return;
-            } else {
-                // Singer files remain optional
-                return;
-            }
-
-            if (!isOutdated) return; // Exits untouched if unversioned and targetVersion == initial baseline
-            bool migrated = MigrateAndWriteYaml(filePath, currentVersion, targetVersion);
-            if (migrated) return;
-            try {
-                string backupVersion = string.IsNullOrEmpty(currentVersion) ? "unversioned" : currentVersion;
-                string backupFile = Path.Combine(
-                    Path.GetDirectoryName(filePath) ?? string.Empty,
-                    $"{Path.GetFileNameWithoutExtension(filePath)}_backup({backupVersion}).yaml"
-                );
-
-                File.Copy(filePath, backupFile, overwrite: true);
-                File.WriteAllBytes(filePath, YamlTemplate);
-                Log.Information($"[YamlUpdate] Updated '{filePath}' to template version {targetVersion}");
-            } catch (Exception ex) {
-                Log.Error(ex, $"[YamlUpdate] Failed to update '{filePath}'");
-            }
-        }
-
         /// <summary>
         /// Forces mapping items inside list sequences to format in compact Flow style: - {from: a, to: b}
         /// </summary>
@@ -621,165 +480,7 @@ namespace OpenUtau.Plugin.Builtin {
                 base.Emit(eventInfo, emitter);
             }
         }
-
-        private bool MigrateAndWriteYaml(string filePath, string currentVersion, string targetVersion) {
-            try {
-                if (YamlTemplate == null || YamlTemplate.Length == 0) return false;
-
-                var userYaml = LoadYamlCached(filePath);
-                var newTemplate = TolerantDeserializer.Deserialize<YAMLData>(Encoding.UTF8.GetString(YamlTemplate));
-
-                if (userYaml == null || newTemplate == null) return false;
-
-                // Merge Timings
-                var mergedTimings = newTemplate.timings?.ToList() ?? new List<YAMLData.Timings>();
-                if (userYaml.timings != null) {
-                    foreach (var ut in userYaml.timings) {
-                        mergedTimings.RemoveAll(t => string.Equals(t.symbol, ut.symbol, StringComparison.Ordinal));
-                        mergedTimings.Add(ut);
-                    }
-                }
-
-                // Merge Replacements & normalize default 'where: inside'
-                var mergedReplacements = newTemplate.replacements?.ToList() ?? new List<Replacement>();
-                if (userYaml.replacements != null) {
-                    foreach (var ur in userYaml.replacements) {
-                        mergedReplacements.RemoveAll(r => GetReplacementKey(r) == GetReplacementKey(ur));
-                        mergedReplacements.Add(ur);
-                    }
-                }
-                foreach (var r in mergedReplacements) {
-                    if (r.where == "inside") r.where = null;
-                }
-
-                // Merge Fallbacks
-                var mergedFallbacks = newTemplate.fallbacks?.ToList() ?? new List<Replacement>();
-                if (userYaml.fallbacks != null) {
-                    foreach (var uf in userYaml.fallbacks) {
-                        mergedFallbacks.RemoveAll(f => GetReplacementKey(f) == GetReplacementKey(uf));
-                        mergedFallbacks.Add(uf);
-                    }
-                }
-                foreach (var f in mergedFallbacks) {
-                    if (f.where == "inside") f.where = null;
-                }
-
-                // Merge Vowel Sustains
-                var mergedSustains = newTemplate.vowelsustains?.ToList() ?? new List<YAMLData.VowelSustainData>();
-                if (userYaml.vowelsustains != null) {
-                    foreach (var us in userYaml.vowelsustains) {
-                        mergedSustains.RemoveAll(s => string.Equals(s.symbol, us.symbol, StringComparison.Ordinal));
-                        mergedSustains.Add(us);
-                    }
-                }
-
-                // Merge Symbols (User symbols override defaults by symbol name)
-                var mergedSymbols = newTemplate.symbols?.ToList() ?? new List<YAMLData.SymbolData>();
-                if (userYaml.symbols != null) {
-                    foreach (var usym in userYaml.symbols) {
-                        mergedSymbols.RemoveAll(s => string.Equals(s.symbol, usym.symbol, StringComparison.Ordinal));
-                        mergedSymbols.Add(usym);
-                    }
-                }
-
-                // Set properties on new template base
-                newTemplate.version = targetVersion;
-                newTemplate.timings = mergedTimings.ToArray();
-                newTemplate.replacements = mergedReplacements.ToArray();
-                newTemplate.fallbacks = mergedFallbacks.ToArray();
-                newTemplate.vowelsustains = mergedSustains.ToArray();
-                newTemplate.symbols = mergedSymbols.ToArray();
-
-                // Create safety backup
-                string backupVersion = string.IsNullOrEmpty(currentVersion) ? "unknown" : currentVersion;
-                string backupFile = Path.Combine(
-                    Path.GetDirectoryName(filePath) ?? string.Empty,
-                    $"{Path.GetFileNameWithoutExtension(filePath)}_backup({backupVersion}).yaml"
-                );
-                File.Copy(filePath, backupFile, overwrite: true);
-
-                var serializer = new YamlDotNet.Serialization.SerializerBuilder()
-                    .WithNamingConvention(YamlDotNet.Serialization.NamingConventions.UnderscoredNamingConvention.Instance)
-                    .ConfigureDefaultValuesHandling(
-                        YamlDotNet.Serialization.DefaultValuesHandling.OmitNull | 
-                        YamlDotNet.Serialization.DefaultValuesHandling.OmitEmptyCollections
-                    )
-                    .WithIndentedSequences()
-                    .WithEventEmitter(next => new SbpFlowStyleEventEmitter(next))
-                    .Build();
-
-                string tempYaml = serializer.Serialize(newTemplate);
-
-                // Merge custom dynamic fields (ExtensionData)
-                var mergedMap = TolerantDeserializer.Deserialize<Dictionary<string, object>>(tempYaml) 
-                                ?? new Dictionary<string, object>(StringComparer.Ordinal);
-
-                if (userYaml.ExtensionData != null) {
-                    foreach (var kvp in userYaml.ExtensionData) {
-                        mergedMap[kvp.Key] = kvp.Value;
-                    }
-                }
-
-                string finalOutput = serializer.Serialize(mergedMap);
-                File.WriteAllText(filePath, finalOutput, Encoding.UTF8);
-
-                Log.Information($"[Migration] Successfully migrated '{filePath}' from v{currentVersion} to v{targetVersion}");
-                return true;
-            } catch (Exception ex) {
-                Log.Error(ex, $"[Migration] Failed migrating '{filePath}'.");
-                return false;
-            }
-        }
         
-        private static string GetReplacementKey(Replacement r) {
-            if (r == null) return string.Empty;
-            string fromStr = string.Join(",", r.FromList);
-            return $"{fromStr}:{r.where}";
-        }
-
-        private static YAMLData LoadYamlCached(string filePath) {
-            string fullPath = Path.GetFullPath(filePath);
-            var lastWrite = File.GetLastWriteTimeUtc(fullPath);
-
-            if (YamlCache.TryGetValue(fullPath, out var cached) && cached.lastModified == lastWrite) {
-                return cached.data;
-            }
-
-            try {
-                using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                using var reader = new StreamReader(stream, Encoding.UTF8);
-                var parsed = TolerantDeserializer.Deserialize<YAMLData>(reader);
-
-                if (parsed != null) {
-                    try {
-                        stream.Position = 0;
-                        using var rawReader = new StreamReader(stream, Encoding.UTF8);
-                        var rawMap = TolerantDeserializer.Deserialize<Dictionary<string, object>>(rawReader);
-
-                        if (rawMap != null) {
-                            var knownKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
-                                "version", "isglides", "symbols", "replacements", "fallbacks",
-                                "timings", "diphthongs", "vowelsustains"
-                            };
-                            parsed.ExtensionData.Clear();
-                            foreach (var kvp in rawMap) {
-                                if (!knownKeys.Contains(kvp.Key)) {
-                                    parsed.ExtensionData[kvp.Key] = kvp.Value;
-                                }
-                            }
-                        }
-                    } catch {
-                        // Ignores raw map errors if custom parsing fails
-                    }
-                }
-                YamlCache[fullPath] = (lastWrite, parsed);
-                return parsed;
-            } catch (Exception ex) {
-                Log.Error(ex, $"Failed to deserialize YAML at '{fullPath}'");
-                return null;
-            }
-        }
-
         public override void SetSinger(USinger singer) {
             if (_singerLoaded && this.singer == singer && localSbpGeneration == globalSbpGeneration) {
                 return;
@@ -824,196 +525,7 @@ namespace OpenUtau.Plugin.Builtin {
                 string singerFile = (singer != null && singer.Found && singer.Loaded && !string.IsNullOrEmpty(singer.Location)) 
                     ? Path.Combine(singer.Location, YamlFileName) 
                     : null;
-
-                // Local helper function to update and backup YAML files safely
-                CheckAndUpdateYamls(globalFile, singerFile);
-
-                // add to parsing list (Global first, Singer second)
-                var filesToParse = new List<string>();
-                if (File.Exists(globalFile)) filesToParse.Add(globalFile);
-                if (!string.IsNullOrEmpty(singerFile) && File.Exists(singerFile)) filesToParse.Add(singerFile);
-
-                // backups of hardcoded defaults exist
-                if (backupVowels == null) backupVowels = GetVowels() ?? Array.Empty<string>();
-                if (backupConsonants == null) backupConsonants = GetConsonants() ?? Array.Empty<string>();
-                if (backupDictionaryReplacements == null) backupDictionaryReplacements = new Dictionary<string, string>(dictionaryReplacements, StringComparer.Ordinal);
-                if (backupDiphthongTails == null) backupDiphthongTails = new Dictionary<string, string>(diphthongTails, StringComparer.Ordinal);
-                if (backupDiphthongSplits == null) backupDiphthongSplits = new Dictionary<string, string[]>(diphthongSplits, StringComparer.Ordinal);
-
-                // reset live arrays/lists back to defaults before stacking
-                vowels = backupVowels;
-                consonants = backupConsonants;
-                tails = "-".Split(','); 
-
-                fricative = Array.Empty<string>();
-                aspirate = Array.Empty<string>();
-                semivowel = Array.Empty<string>();
-                liquid = Array.Empty<string>();
-                nasal = Array.Empty<string>();
-                stop = Array.Empty<string>();
-                tap = Array.Empty<string>();
-                affricate = Array.Empty<string>();
-
-                dictionaryReplacements.Clear();
-                foreach (var kvp in backupDictionaryReplacements) dictionaryReplacements[kvp.Key] = kvp.Value;
-
-                diphthongTails.Clear();
-                foreach (var kvp in backupDiphthongTails) diphthongTails[kvp.Key] = kvp.Value;
-
-                diphthongSplits.Clear();
-                foreach (var kvp in backupDiphthongSplits) diphthongSplits[kvp.Key] = kvp.Value;
-
-                mergingReplacements.Clear();
-                splittingReplacements.Clear();
-                yamlFallbacks.Clear();
-                PhonemeOverrides.Clear();
-                if (backupVowelSustains == null) backupVowelSustains = new Dictionary<string, (string, double)>(vowelSustains, StringComparer.Ordinal);
-                vowelSustains.Clear();
-                foreach (var kvp in backupVowelSustains) vowelSustains[kvp.Key] = kvp.Value;
-
-                // parse the files sequentially (Singer configs seamlessly overwrite global configs)
-                foreach (var file in filesToParse) {
-                    try {
-                        var data = LoadYamlCached(file);
-                        if (data == null) continue;
-                        
-                        if (data.symbols != null && data.symbols.Length > 0) {
-                            var symbolLookup = data.symbols
-                                .Where(s => !string.IsNullOrEmpty(s.symbol) && !string.IsNullOrEmpty(s.type))
-                                .ToLookup(s => s.type, s => s.symbol, StringComparer.OrdinalIgnoreCase);
-
-                            var yamlVowels = symbolLookup["vowel"].Concat(symbolLookup["diphthong"]).ToArray();
-                            vowels = yamlVowels.Concat(vowels).Distinct(StringComparer.Ordinal).ToArray();
-
-                            var yamlTails = symbolLookup["tail"].ToArray();
-                            tails = yamlTails.Concat(tails).Distinct(StringComparer.Ordinal).ToArray();
-
-                            var yFricative = symbolLookup["fricative"].ToArray();
-                            fricative = yFricative.Concat(fricative).Distinct(StringComparer.Ordinal).ToArray();
-
-                            var yAspirate = symbolLookup["aspirate"].ToArray();
-                            aspirate = yAspirate.Concat(aspirate).Distinct(StringComparer.Ordinal).ToArray();
-
-                            var ySemivowel = symbolLookup["semivowel"].ToArray();
-                            semivowel = ySemivowel.Concat(semivowel).Distinct(StringComparer.Ordinal).ToArray();
-
-                            var yLiquid = symbolLookup["liquid"].ToArray();
-                            liquid = yLiquid.Concat(liquid).Distinct(StringComparer.Ordinal).ToArray();
-
-                            var yNasal = symbolLookup["nasal"].ToArray();
-                            nasal = yNasal.Concat(nasal).Distinct(StringComparer.Ordinal).ToArray();
-
-                            var yStop = symbolLookup["stop"].ToArray();
-                            stop = yStop.Concat(stop).Distinct(StringComparer.Ordinal).ToArray();
-
-                            var yTap = symbolLookup["tap"].ToArray();
-                            tap = yTap.Concat(tap).Distinct(StringComparer.Ordinal).ToArray();
-
-                            var yAffricate = symbolLookup["affricate"].ToArray();
-                            affricate = yAffricate.Concat(affricate).Distinct(StringComparer.Ordinal).ToArray();
-
-                            var yamlConsonants = yFricative.Concat(yAspirate).Concat(ySemivowel).Concat(yLiquid)
-                                .Concat(yNasal).Concat(yStop).Concat(yTap).Concat(yAffricate).ToArray();
-                            consonants = yamlConsonants.Concat(consonants).Distinct(StringComparer.Ordinal).ToArray();
-
-                            // DIPHTHONG AUTO-TAIL DETECTION
-                            var yamlDiphthongs = symbolLookup["diphthong"].Distinct(StringComparer.Ordinal).ToArray();
-                            var dynamicTails = consonants.OrderByDescending(c => c.Length).ToArray();
-
-                            foreach (var d in yamlDiphthongs) {
-                                var customMapping = data.diphthongs?.FirstOrDefault(dt => string.Equals(dt.from, d, StringComparison.Ordinal));
-                                if (customMapping != null && !string.IsNullOrEmpty(customMapping.to)) {
-                                    diphthongTails[d] = customMapping.to;
-                                } else {
-                                    diphthongTails[d] = d + "-";
-                                }
-                            }
-                        }
-                        
-                        if (data?.isglides != null) enableGlides = data.isglides.Value; 
-
-                        // OVERRIDES & DICTIONARIES (Singer keys overwrite global keys)
-                        if (data?.timings != null) {
-                            foreach (var t in data.timings) PhonemeOverrides[t.symbol] = t.value;
-                        }
-
-                        if (data?.replacements != null) {
-                            var localMerge = new List<Replacement>();
-                            var localSplit = new List<Replacement>();
-                            string GetFromKey(object fromObj) {
-                                if (fromObj is string s) return s;
-                                if (fromObj is System.Collections.IEnumerable e) {
-                                    return string.Join(",", e.Cast<object>().Select(x => x?.ToString() ?? ""));
-                                }
-                                return "";
-                            }
-
-                            foreach (var rawReplacement in data.replacements) {
-                                string fromKey = GetFromKey(rawReplacement.from);
-                                mergingReplacements.RemoveAll(r => string.Equals(GetFromKey(r.from), fromKey, StringComparison.Ordinal));
-                                splittingReplacements.RemoveAll(r => string.Equals(GetFromKey(r.from), fromKey, StringComparison.Ordinal));
-                                
-                                if (rawReplacement.from is string fromStr) {
-                                    dictionaryReplacements.Remove(fromStr);
-                                }
-
-                                List<string> fromList = rawReplacement.FromList;
-                                List<string> toList = rawReplacement.ToList;
-                                object parsedFrom = fromList.Count == 1 ? fromList[0] : fromList.ToArray();
-                                object parsedTo = toList.Count == 1 ? toList[0] : toList.ToArray();
-
-                                var cleanReplacement = new Replacement {
-                                    from = parsedFrom,
-                                    to = parsedTo,
-                                    where = rawReplacement.where
-                                };
-
-                                if (parsedFrom is string) {
-                                    localSplit.Add(cleanReplacement);
-                                } else {
-                                    localMerge.Add(cleanReplacement);
-                                }
-                            }
-                            mergingReplacements.InsertRange(0, localMerge);
-                            splittingReplacements.InsertRange(0, localSplit);
-                        }
-
-                        if (data?.fallbacks != null) {
-                            var localFallbacks = new List<Replacement>();
-                            foreach (var df in data.fallbacks) {
-                                if (df.FromList.Count > 0 && df.ToList.Count > 0) {
-                                    localFallbacks.Add(df);
-                                }
-                            }
-                            yamlFallbacks.InsertRange(0, localFallbacks);
-                        }
-
-                        if (data?.diphthongs != null) {
-                            foreach (var d in data.diphthongs) {
-                                if (!string.IsNullOrEmpty(d.from) && !string.IsNullOrEmpty(d.to)) {
-                                    diphthongTails[d.from] = d.to; 
-                                }
-                            }
-                        }
-
-                        if (data?.vowelsustains != null) {
-                            foreach (var v in data.vowelsustains) {
-                                if (!string.IsNullOrEmpty(v.symbol) && !string.IsNullOrEmpty(v.sustain)) {
-                                    vowelSustains[v.symbol] = (v.sustain, v.offset);
-                                }
-                            }
-                        }
-
-                    } catch (Exception ex) {
-                        Log.Error($"Failed to parse {file}: {ex.Message}");
-                    }
-                }
-
-            if (!hasDictionary) {
-                ReadDictionaryAndInit();
-            } else {
-                Init();
-            }
+                this.mergedData = yamlOverseer.MergeWithPriority();
             _singerLoaded = true;
         }
 
@@ -1621,9 +1133,9 @@ namespace OpenUtau.Plugin.Builtin {
                 string path = Path.Combine(PluginDir, YamlFileName);
                 
                 // Write template if missing
-                if (!File.Exists(path) && YamlTemplate != null) {
+                if (!File.Exists(path) && yamlOverseer.YamlTemplate != null) {
                     Directory.CreateDirectory(PluginDir);
-                    File.WriteAllBytes(path, YamlTemplate);
+                    File.WriteAllBytes(path, yamlOverseer.YamlTemplate);
                 }
 
                 // Load dictionary from Singer Folder (Highest Priority)
@@ -1845,11 +1357,6 @@ namespace OpenUtau.Plugin.Builtin {
         /// When false, lyrics are split strictly by spaces.
         /// </summary>
         protected virtual bool EnablePhonemeTokenization => false;
-
-        protected virtual string YamlFileName => null;
-        protected virtual byte[] YamlTemplate => null;
-        protected virtual string YamlVersion => null;
-
         protected string[] vowels = Array.Empty<string>();
         protected string[] consonants = Array.Empty<string>();
         protected string[] tails = "-,R".Split(',');
@@ -1869,55 +1376,6 @@ namespace OpenUtau.Plugin.Builtin {
 
         protected Dictionary<string, string> diphthongTails = new Dictionary<string, string>(StringComparer.Ordinal);
         protected Dictionary<string, string[]> diphthongSplits = new Dictionary<string, string[]>(StringComparer.Ordinal);
-
-        public class YAMLData {
-            public string version { get; set; }
-            public bool? isglides { get; set; }
-            public SymbolData[] symbols { get; set; } = Array.Empty<SymbolData>();
-            public Replacement[] replacements { get; set; } = Array.Empty<Replacement>();
-            public Replacement[] fallbacks { get; set; } = Array.Empty<Replacement>();
-            public Timings[] timings { get; set; } = Array.Empty<Timings>();
-            public DiphthongData[] diphthongs { get; set; } = Array.Empty<DiphthongData>();
-            public VowelSustainData[] vowelsustains { get; set; } = Array.Empty<VowelSustainData>();
-            public EntryData[] entries { get; set; } = Array.Empty<EntryData>();
-
-            /// <summary>
-            /// Automatically captures child-specific or custom YAML fields (e.g., wanakana, vcVowels etc)
-            /// so they are preserved and written back out during migration.
-            /// </summary>
-            [YamlDotNet.Serialization.YamlIgnore]
-            public Dictionary<string, object> ExtensionData { get; set; } = new Dictionary<string, object>(StringComparer.Ordinal);
-
-            public class SymbolData { public string symbol { get; set; } public string type { get; set; } }
-            public class Timings { public string symbol { get; set; } public double value { get; set; } }
-            public class DiphthongData { public string from { get; set; } public string to { get; set; } }
-            public class VowelSustainData { public string symbol { get; set; } public string sustain { get; set; } public double offset { get; set; } }
-            public class EntryData { public string grapheme { get; set; } public string[] phonemes { get; set; } }
-        }
-
-        public class Replacement {
-            public object from { get; set; }
-            public object to { get; set; }
-            public string where { get; set; } = "inside";
-
-            [YamlDotNet.Serialization.YamlIgnore]
-            public List<string> FromList {
-                get {
-                    if (from is string s) return new List<string> { s };
-                    if (from is IEnumerable<object> list) return list.Select(x => x.ToString() ?? "null").ToList();
-                    return new List<string>();
-                }
-            }
-
-            [YamlDotNet.Serialization.YamlIgnore]
-            public List<string> ToList {
-                get {
-                    if (to is string s) return new List<string> { s };
-                    if (to is IEnumerable<object> list) return list.Select(x => x.ToString() ?? "null").ToList();
-                    return new List<string>();
-                }
-            }
-        }
 
         protected List<Replacement> mergingReplacements = new List<Replacement>();
         protected List<Replacement> splittingReplacements = new List<Replacement>();
