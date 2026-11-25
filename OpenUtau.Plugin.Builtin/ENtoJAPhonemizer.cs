@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Openutau.Core.Classic;
 using OpenUtau.Api;
 using OpenUtau.Core.G2p;
 using OpenUtau.Core.Ustx;

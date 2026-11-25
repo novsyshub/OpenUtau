@@ -10,7 +10,7 @@ using OpenUtau.Core.Ustx;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
-namespace Openutau.Plugin.Builtin {
+namespace Openutau.Core.Classic {
     public class YAMLData { 
         // Interface so phonemizers can add unique sections to their own YAMLData class
         public string? version = string.Empty;
@@ -24,7 +24,6 @@ namespace Openutau.Plugin.Builtin {
         public Timing[] timings = [];
         public VowelSustainData[] vowelsustains = [];
     }
-        
     public class Replacement {
         public required object from { get; set; }
         public required object to { get; set; }
@@ -91,6 +90,7 @@ namespace Openutau.Plugin.Builtin {
         public void setupYamlWatcher(string watchedDir,string? message=null) {
             if (string.IsNullOrEmpty(message)) message = $"[YamlAccessor] YAML change detected in {watchedDir}. Reloading...";
             if (!Directory.Exists(watchedDir)) return;
+            this.yamlWatcher?.Dispose();
             YamlWatcher yamlWatcher = new YamlWatcher(watchedDir, () => {
                 Log.Information($"[YamlAccessor] {message}");
                 System.Threading.Thread.Sleep(200);
@@ -152,11 +152,20 @@ namespace Openutau.Plugin.Builtin {
                 return null;
             }
         }
+        public void Dispose() {
+            try {
+                #pragma warning disable CS8602 
+                // temp disable null warning--that's what this is for
+                this.yamlWatcher.Dispose();
+                #pragma warning restore CS8602
+            } catch { };
+        }
     }    
 
     public class YamlOverseer {
-        public required string YamlFileName;
-        public byte[]? YamlTemplate = null;
+        public required string? YamlFileName;
+        public required byte[]? YamlTemplate;
+        public virtual string? YamlVersion {get;}
         public string? currentlyWatchedSingerDir = null;
         public string? currentlyWatchedPluginDir = null;
         public YamlAccessor? singerYamlWatcher = null;
@@ -202,8 +211,12 @@ namespace Openutau.Plugin.Builtin {
                     type = type
                 };
         }
-
-        public YAMLData MergeWithPriority(YamlAccessor[] allAvailableWatchers) {
+        /// <summary>
+        /// Merges watched yaml files in the order listed, with the next overriding the previous (defaults to the associated plugin and singer yamls)
+        /// </summary>
+        /// <param name="allAvailableWatchers"></param>
+        /// <returns></returns>
+        public YAMLData MergeWithPriority(YamlAccessor?[]? allAvailableWatchers = null) {
                 string[] fricative = [];
                 string[] aspirate = [];
                 string[] semivowel = [];
@@ -216,10 +229,13 @@ namespace Openutau.Plugin.Builtin {
                 Dictionary<string, (string sustain, double offset)> vowelSustains = new(StringComparer.Ordinal);
                 YAMLData mergedResult = new();
 
+                allAvailableWatchers ??= [this.pluginYamlWatcher,this.singerYamlWatcher];
 
                 // parse the files sequentially (Singer configs seamlessly overwrite global configs)
                 foreach (var watcher in allAvailableWatchers) {
                     try {
+                        if (watcher == null) continue;
+
                         var data = watcher.LoadYamlCached(YamlFileName);
 
                         if (data == null) continue;
@@ -413,7 +429,7 @@ namespace Openutau.Plugin.Builtin {
         /// <summary>
         /// Core version parser that reads line-by-line from any TextReader stream.
         /// </summary>
-        private static string ReadVersionFast(TextReader reader) {
+        public static string ReadVersionFast(TextReader reader) {
             if (reader == null) return string.Empty;
             try {
                 string? line;
@@ -433,14 +449,14 @@ namespace Openutau.Plugin.Builtin {
             return string.Empty;
         }
         /// Overload for byte[].
-        private static string ReadVersionFast(byte[] bytes) {
+        public static string ReadVersionFast(byte[] bytes) {
             if (bytes == null || bytes.Length == 0) return string.Empty;
             using var ms = new MemoryStream(bytes);
             using var reader = new StreamReader(ms, Encoding.UTF8);
             return ReadVersionFast(reader);
         }
         /// Overload for file paths
-        private static string ReadVersionFast(string filePath) {
+        public static string ReadVersionFast(string filePath) {
             if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) return string.Empty;
             try {
                 using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
