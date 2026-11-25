@@ -203,13 +203,6 @@ namespace Openutau.Plugin.Builtin {
                 };
         }
 
-        private static Replacement toReplacement(object from, object to) {
-            return new Replacement {
-                    from = from,
-                    to = to
-                };
-        }
-
         public YAMLData MergeWithPriority(YamlAccessor[] allAvailableWatchers) {
                 string[] fricative = [];
                 string[] aspirate = [];
