@@ -203,15 +203,12 @@ namespace Openutau.Plugin.Builtin {
                 };
         }
 
-        // I'm not sure if this actually needs overloads since it always treats from and to the same??? 
-        // If it doesn't then idk what to put the types of from and to as
         private static Replacement toReplacement(object from, object to) {
             return new Replacement {
                     from = from,
                     to = to
                 };
         }
-        // overload for merging replacement
 
         public YAMLData MergeWithPriority(YamlAccessor[] allAvailableWatchers) {
                 string[] fricative = [];
