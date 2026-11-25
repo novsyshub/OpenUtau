@@ -57,7 +57,7 @@ namespace Openutau.Plugin.Builtin {
         public required string type;
         public string? alias;
     }
-    public struct DiphthongData {
+    public class DiphthongData {
         public string from = String.Empty;
         public string to = String.Empty;
         public DiphthongData() {
